@@ -5,8 +5,6 @@ light, fan, door lock) over the internet using an ESP32, a 4-channel relay
 module, and the MQTT protocol via HiveMQ Cloud — with an added browser-based
 voice control front end.
 
-**Department of ECE** · Team: P Girish, G Mukhesh Kumar, P Mahesh · Guide: Dr. N. Prabakaran
-
 ## 🔴 Live Demo
 **https://home-automation-voice-control.netlify.app/**
 This is the deployed voice-control dashboard (built with Lovable, hosted on

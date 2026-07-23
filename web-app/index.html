@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Voice Control Home Automation</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.7.0/mqtt.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1220; --card:#171b2e; --accent:#5b8cff; --on:#33d17a; --off:#4a4f66; --text:#e8eaf2;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    background:var(--bg); color:var(--text); min-height:100vh; padding:24px;
+  }
+  h1{font-size:1.3rem; font-weight:600; margin:0 0 4px;}
+  .sub{color:#9aa0b4; font-size:.9rem; margin-bottom:24px;}
+  .panel{
+    background:var(--card); border-radius:16px; padding:20px; margin-bottom:16px;
+    box-shadow:0 4px 20px rgba(0,0,0,.25);
+  }
+  .conn-row{display:flex; gap:10px; align-items:center; flex-wrap:wrap;}
+  .conn-row input{
+    flex:1; min-width:180px; background:#0f1220; border:1px solid #2a2f4a; color:var(--text);
+    padding:10px 12px; border-radius:10px; font-size:.9rem;
+  }
+  button{
+    border:none; border-radius:10px; padding:10px 16px; font-size:.9rem; cursor:pointer;
+    font-weight:600;
+  }
+  .btn-primary{background:var(--accent); color:#fff;}
+  .btn-primary:disabled{opacity:.5; cursor:not-allowed;}
+  .status{display:flex; align-items:center; gap:8px; font-size:.85rem; margin-top:10px; color:#9aa0b4;}
+  .dot{width:9px; height:9px; border-radius:50%; background:#e0463d;}
+  .dot.live{background:var(--on);}
+  .mic-btn{
+    display:flex; align-items:center; justify-content:center; gap:10px;
+    width:100%; padding:18px; border-radius:14px; background:var(--accent); color:#fff;
+    font-size:1.05rem; margin-bottom:10px;
+  }
+  .mic-btn.listening{background:#e0463d; animation:pulse 1.1s infinite;}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(224,70,61,.5);}70%{box-shadow:0 0 0 16px rgba(224,70,61,0);}100%{box-shadow:0 0 0 0 rgba(224,70,61,0);}}
+  .transcript{min-height:24px; color:#c7cbe0; font-size:.95rem; text-align:center; margin-bottom:6px;}
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
+  .device-card{
+    background:#12152a; border:1px solid #23274a; border-radius:14px; padding:16px;
+    display:flex; flex-direction:column; gap:10px;
+  }
+  .device-name{font-weight:600; text-transform:capitalize;}
+  .state-pill{font-size:.75rem; padding:3px 10px; border-radius:999px; width:fit-content; background:var(--off);}
+  .state-pill.on{background:var(--on); color:#06251a;}
+  .toggle-row{display:flex; gap:8px;}
+  .toggle-row button{flex:1; background:#20243f; color:var(--text);}
+  .toggle-row button.active{background:var(--accent); color:#fff;}
+  .log{
+    background:#0b0e1c; border-radius:10px; padding:10px 12px; font-size:.78rem; color:#7f86a3;
+    max-height:130px; overflow-y:auto; font-family:ui-monospace,Consolas,monospace;
+  }
+  .hint{font-size:.78rem; color:#7f86a3; margin-top:10px; line-height:1.5;}
+  .hint b{color:#b7bcd4;}
+</style>
+</head>
+<body>
+
+<h1>🏠 Voice Control Home Automation</h1>
+<div class="sub">Speak a command, or tap a device. Connects directly to your HiveMQ broker over WebSocket.</div>
+
+<div class="panel">
+  <div class="conn-row">
+    <input id="host" placeholder="Broker WebSocket URL (wss://xxxx.s1.eu.hivemq.cloud:8884/mqtt)" />
+    <input id="user" placeholder="MQTT username" style="max-width:160px;" />
+    <input id="pass" type="password" placeholder="MQTT password" style="max-width:160px;" />
+    <button class="btn-primary" id="connectBtn">Connect</button>
+  </div>
+  <div class="status"><span class="dot" id="dot"></span><span id="statusText">Not connected</span></div>
+</div>
+
+<div class="panel">
+  <button class="mic-btn" id="micBtn" disabled>🎤 Tap and speak a command</button>
+  <div class="transcript" id="transcript">Try: "turn on the bedroom light" / "turn off the fan" / "open the door"</div>
+</div>
+
+<div class="panel">
+  <div class="grid" id="deviceGrid"></div>
+</div>
+
+<div class="panel">
+  <div style="font-size:.85rem; margin-bottom:8px; color:#9aa0b4;">Activity log</div>
+  <div class="log" id="log"></div>
+  <div class="hint">
+    <b>Setup:</b> In HiveMQ Cloud Console, enable the <b>WebSocket</b> listener (default port 8884) —
+    it's on by default for new clusters. Paste that URL above along with your existing MQTT
+    username/password. This page never talks to the ESP32 directly; it publishes to the same
+    broker topics (<code>home/&lt;device&gt;/set</code>) the firmware already subscribes to.
+    <br><br>
+    <b>Privacy:</b> speech recognition runs via your browser's built-in Web Speech API
+    (Chrome/Edge). Nothing is sent anywhere except the short MQTT command.
+  </div>
+</div>
+
+<script>
+const DEVICES = ["bedroom", "hall", "fan", "door"];
+const state = {};
+let client = null;
+
+const grid = document.getElementById('deviceGrid');
+DEVICES.forEach(d => {
+  const card = document.createElement('div');
+  card.className = 'device-card';
+  card.innerHTML = `
+    <div class="device-name">${d}</div>
+    <div class="state-pill" id="pill-${d}">OFF</div>
+    <div class="toggle-row">
+      <button data-d="${d}" data-a="ON">ON</button>
+      <button data-d="${d}" data-a="OFF">OFF</button>
+    </div>`;
+  grid.appendChild(card);
+});
+grid.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-d]');
+  if (!btn) return;
+  sendCommand(btn.dataset.d, btn.dataset.a);
+});
+
+function log(msg) {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function setPill(device, on) {
+  const pill = document.getElementById(`pill-${device}`);
+  if (!pill) return;
+  pill.textContent = on ? 'ON' : 'OFF';
+  pill.classList.toggle('on', on);
+}
+
+function sendCommand(device, action) {
+  if (!client || !client.connected) { log('Not connected to broker.'); return; }
+  client.publish(`home/${device}/set`, action);
+  log(`Sent: ${device} -> ${action}`);
+}
+
+document.getElementById('connectBtn').addEventListener('click', () => {
+  const url = document.getElementById('host').value.trim();
+  const user = document.getElementById('user').value.trim();
+  const pass = document.getElementById('pass').value;
+  if (!url) { log('Enter a broker WebSocket URL first.'); return; }
+
+  if (client) client.end(true);
+
+  client = mqtt.connect(url, {
+    username: user, password: pass,
+    clientId: 'webvoice_' + Math.random().toString(16).slice(2),
+    clean: true, reconnectPeriod: 3000,
+  });
+
+  client.on('connect', () => {
+    document.getElementById('dot').classList.add('live');
+    document.getElementById('statusText').textContent = 'Connected to broker';
+    document.getElementById('micBtn').disabled = false;
+    DEVICES.forEach(d => client.subscribe(`home/${d}/state`));
+    log('Connected to MQTT broker.');
+  });
+
+  client.on('message', (topic, payload) => {
+    const parts = topic.split('/');
+    const device = parts[1];
+    const on = payload.toString() === 'ON';
+    state[device] = on;
+    setPill(device, on);
+  });
+
+  client.on('close', () => {
+    document.getElementById('dot').classList.remove('live');
+    document.getElementById('statusText').textContent = 'Disconnected';
+    document.getElementById('micBtn').disabled = true;
+  });
+
+  client.on('error', err => log('Connection error: ' + err.message));
+});
+
+// ---------------- Voice recognition ----------------
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const micBtn = document.getElementById('micBtn');
+const transcriptEl = document.getElementById('transcript');
+
+if (!SpeechRecognition) {
+  transcriptEl.textContent = 'Speech recognition is not supported in this browser. Try Chrome or Edge.';
+  micBtn.disabled = true;
+} else {
+  const recognition = new SpeechRecognition();
+  recognition.continuous = false;
+  recognition.lang = 'en-US';
+  recognition.interimResults = false;
+
+  let listening = false;
+
+  micBtn.addEventListener('click', () => {
+    if (listening) { recognition.stop(); return; }
+    recognition.start();
+  });
+
+  recognition.onstart = () => {
+    listening = true;
+    micBtn.classList.add('listening');
+    micBtn.textContent = '🎙️ Listening...';
+  };
+
+  recognition.onend = () => {
+    listening = false;
+    micBtn.classList.remove('listening');
+    micBtn.textContent = '🎤 Tap and speak a command';
+  };
+
+  recognition.onresult = (event) => {
+    const text = event.results[0][0].transcript.toLowerCase();
+    transcriptEl.textContent = `Heard: "${text}"`;
+    parseAndSend(text);
+  };
+
+  recognition.onerror = (event) => {
+    log('Speech recognition error: ' + event.error);
+  };
+}
+
+function parseAndSend(text) {
+  const device = DEVICES.find(d => text.includes(d)) ||
+                 (text.includes('light') ? 'hall' : null); // fallback if user just says "light"
+
+  if (!device) { log(`Could not match a device in: "${text}"`); return; }
+
+  let action = null;
+  if (/\b(on|open|start|unlock)\b/.test(text)) action = 'ON';
+  if (/\b(off|close|stop|lock)\b/.test(text)) action = 'OFF';
+
+  if (!action) { log(`Could not determine ON/OFF in: "${text}"`); return; }
+
+  sendCommand(device, action);
+}
+</script>
+</body>
+</html>
